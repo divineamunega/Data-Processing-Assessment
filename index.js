@@ -42,6 +42,7 @@ async function processName(name) {
     throw new Error(e);
   }
 }
+
 async function agifyName(name) {
   try {
     const res = await fetch(`https://api.agify.io/?name=${name}`);
@@ -51,6 +52,7 @@ async function agifyName(name) {
     throw new Error(e);
   }
 }
+
 async function getCountryID(name) {
   try {
     const res = await fetch(`https://api.nationalize.io?name=${name}`);
@@ -71,6 +73,10 @@ app.post("/api/profiles", async (req, res) => {
         .json({ status: "error", message: "Missing or empty name parameter" });
     }
 
+    if (typeof data !== "string") {
+      return res.status(422).json({ status: "error", message: "Invalid type" });
+    }
+
     // Check if profile already exists
     const existingProfile = await nameModel.findOne({ name: data });
     if (existingProfile) {
@@ -88,11 +94,32 @@ app.post("/api/profiles", async (req, res) => {
       count: sample_size,
     } = await processName(data);
 
+    if (gender === null || sample_size === 0) {
+      res.status(502).json({
+        status: "error",
+        message: "Genderize returned an invalid response",
+      });
+    }
+
     const { age } = await agifyName(data);
+
+    if (age === null) {
+      res.status(502).json({
+        status: "error",
+        message: "Agify returned an invalid response",
+      });
+    }
 
     const countryData = await getCountryID(data);
     const { country_id, probability: country_probability } =
       countryData.country[0];
+
+    if (countryData === null) {
+      res.status(502).json({
+        status: "error",
+        message: "Nationalize returned an invalid response",
+      });
+    }
 
     const age_group =
       age >= 0 && age <= 12
@@ -119,7 +146,7 @@ app.post("/api/profiles", async (req, res) => {
     const newName = new nameModel(newNameResponse);
     await newName.save();
 
-    return res.status(200).json({
+    return res.status(201).json({
       status: "Success",
       data: newNameResponse,
     });
@@ -128,54 +155,152 @@ app.post("/api/profiles", async (req, res) => {
   }
 });
 
-app.get("/api/classify", async (req, res) => {
+app.get("/api/profiles", async (req, res) => {
   try {
-    const data = req.query.name;
+    const { gender, country_id, age_group } = req.query;
 
-    if (!data) {
-      return res
-        .status(400)
-        .json({ status: "error", message: "Missing or empty name parameter" });
+    const filter = {};
+
+    if (gender) {
+      filter.gender = { $regex: `^${gender}$`, $options: "i" };
     }
 
-    if (typeof data !== "string") {
-      return res
-        .status(422)
-        .json({ status: "error", message: "name is not a string" });
+    if (country_id) {
+      filter.country_id = { $regex: `^${country_id}$`, $options: "i" };
     }
 
-    const {
-      name,
-      gender,
-      probability,
-      count: sample_size,
-    } = await processName(data);
-    const is_confident = probability >= 0.7 && sample_size >= 100;
-
-    if (gender === null || sample_size === 0) {
-      res.status(422).json({
-        status: "error",
-        message: "No prediction available for the provided name",
-      });
+    if (age_group) {
+      filter.age_group = { $regex: `^${age_group}$`, $options: "i" };
     }
 
-    res.status(200).json({
+    const profiles = await nameModel.find(filter);
+
+    const responseData = profiles.map((profile) => ({
+      id: profile.id,
+      name: profile.name,
+      gender: profile.gender,
+      age: profile.age,
+      age_group: profile.age_group,
+      country_id: profile.country_id,
+    }));
+
+    return res.status(200).json({
       status: "success",
-      data: {
-        name,
-        gender,
-        probability,
-        is_confident,
-        sample_size,
-        processed_at: new Date().toISOString(),
-      },
+      count: responseData.length,
+      data: responseData,
     });
   } catch (e) {
-    res
-      .status(500)
-      .json({ status: "error", message: "Upstream or server failure" });
+    res.status(500).json({ error: "An internal server error occurred" });
   }
 });
+
+app.get("/api/profiles/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!id) {
+      return res
+        .status(400)
+        .json({ status: "error", message: "Missing or empty id parameter" });
+    }
+
+    if (typeof id !== "string") {
+      return res.status(422).json({ status: "error", message: "Invalid type" });
+    }
+
+    const existingProfile = await nameModel.findOne({ id });
+
+    if (!existingProfile) {
+      return res
+        .status(404)
+        .json({ status: "error", message: "Profile not found" });
+    }
+
+    return res.status(200).json({
+      status: "success",
+      data: existingProfile,
+    });
+  } catch (e) {
+    res.status(500).json({ error: "An internal server error occurred" });
+  }
+});
+
+app.delete("/api/profiles/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!id) {
+      return res
+        .status(400)
+        .json({ status: "error", message: "Missing or empty id parameter" });
+    }
+
+    if (typeof id !== "string") {
+      return res.status(422).json({ status: "error", message: "Invalid type" });
+    }
+
+    const existingProfile = await nameModel.findOneAndDelete({ id });
+
+    if (!existingProfile) {
+      return res
+        .status(404)
+        .json({ status: "error", message: "Profile not found" });
+    }
+
+    return res.status(204).json({});
+  } catch (e) {
+    res.status(500).json({ error: "An internal server error occurred" });
+  }
+});
+
+// app.get("/api/classify", async (req, res) => {
+//   try {
+//     const data = req.query.name;
+
+//     if (!data) {
+//       return res
+//         .status(400)
+//         .json({ status: "error", message: "Missing or empty name parameter" });
+//     }
+
+//     if (typeof data !== "string") {
+//       return res
+//         .status(422)
+//         .json({ status: "error", message: "name is not a string" });
+//     }
+
+//     const {
+//       name,
+//       gender,
+//       probability,
+//       count: sample_size,
+//     } = await processName(data);
+//     const is_confident = probability >= 0.7 && sample_size >= 100;
+
+//     if (gender === null || sample_size === 0) {
+//       res.status(422).json({
+//         status: "error",
+//         message: "No prediction available for the provided name",
+//       });
+//     }
+
+//     res.status(200).json({
+//       status: "success",
+//       data: {
+//         name,
+//         gender,
+//         probability,
+//         is_confident,
+//         sample_size,
+//         processed_at: new Date().toISOString(),
+//       },
+//     });
+//   } catch (e) {
+//     res
+//       .status(500)
+//       .json({ status: "error", message: "Upstream or server failure" });
+//   }
+// });
 
 app.listen(3000, () => {
   console.log("Server is running on port 3000");
